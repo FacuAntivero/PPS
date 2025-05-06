@@ -1,32 +1,12 @@
 const Joi = require("joi");
 const express = require("express");
 const app = express();
+const bcrypt = require("bcrypt");
 app.use(express.json());
 
-// Datos en memoria
-const licenses = [
-  {
-    id: 1,
-    name: "Basic",
-    type: "basic",
-    expirationDate: "2024-12-31",
-    status: "active",
-  },
-  {
-    id: 2,
-    name: "Premium",
-    type: "premium",
-    expirationDate: "2025-06-30",
-    status: "active",
-  },
-  {
-    id: 3,
-    name: "Admin",
-    type: "admin",
-    expirationDate: "2024-01-01",
-    status: "inactive",
-  },
-];
+const port = process.env.PORT || 3000;
+app.listen(port, () => console.log(`Listening on port ${port}...`));
+
 // Esquemas de validación Joi
 const licenseSchema = Joi.object({
   name: Joi.string().min(3).required(),
@@ -42,163 +22,70 @@ const updateLicenseSchema = Joi.object({
   status: Joi.string().valid("active", "inactive"),
 }).min(1); // Al menos un campo debe ser enviado
 
-// Middleware de validación genérico
-const validate = (schema) => (req, res, next) => {
-  const { error } = schema.validate(req.body);
-  if (error) {
-    return res.status(400).json({ error: error.details[0].message });
-  }
-  next();
-};
-
-// Middleware de permisos
-const checkLicensePermission = (allowedTypes) => (req, res, next) => {
-  const licenseType = req.headers["x-license-type"];
-  if (!allowedTypes.includes(licenseType)) {
-    return res.status(403).json({
-      error: `Acceso denegado. Licencia requerida: ${allowedTypes.join(" o ")}`,
-    });
-  }
-  next();
-};
-
-// Endpoints
-app.get(
-  "/licenses",
-  checkLicensePermission(["basic", "premium", "admin"]),
-  (req, res) => {
-    res.json(licenses);
-  }
-);
-
-// GET: Obtener licencia por ID
-app.get(
-  "/licenses/:id",
-  checkLicensePermission(["basic", "premium", "admin"]),
-  (req, res) => {
-    const license = licenses.find((l) => l.id === parseInt(req.params.id));
-    if (!license)
-      return res.status(404).json({ error: "Licencia no encontrada" });
-    res.json(license);
-  }
-);
-
-app.post(
-  "/licenses",
-  checkLicensePermission(["admin", "premium"]),
-  validate(licenseSchema),
-  (req, res) => {
-    const newLicense = { id: licenses.length + 1, ...req.body };
-    licenses.push(newLicense);
-    res.status(201).json(newLicense);
-  }
-);
-
-app.put(
-  "/licenses/:id",
-  checkLicensePermission(["admin"]),
-  validate(updateLicenseSchema),
-  (req, res) => {
-    const license = licenses.find((l) => l.id === parseInt(req.params.id));
-    if (!license)
-      return res.status(404).json({ error: "Licencia no encontrada" });
-
-    Object.assign(license, req.body);
-    res.json(license);
-  }
-);
-
-app.delete("/licenses/:id", checkLicensePermission(["admin"]), (req, res) => {
-  const index = licenses.findIndex((l) => l.id === parseInt(req.params.id));
-  if (index === -1)
-    return res.status(404).json({ error: "Licencia no encontrada" });
-
-  const deletedLicense = licenses.splice(index, 1);
-  res.json(deletedLicense[0]);
+// EndPoint Login
+const loginSchema = Joi.object({
+  nombre: Joi.string().required(),
+  password: Joi.string().required(),
 });
 
-// Manejo de errores global
-app.use((err, req, res, next) => {
-  console.error(err.stack);
-  res.status(500).json({ error: "Error interno del servidor" });
-});
+app.post("/login", async (req, res) => {
+  // Validar entrada con Joi
+  const { error } = loginSchema.validate(req.body);
+  if (error) return res.status(400).json({ error: error.details[0].message });
 
-const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(`Listening on port ${port}...`));
+  const { nombre, password } = req.body;
 
-/*
-const courses = [
-  { id: 1, name: "course1" },
-  { id: 2, name: "course2" },
-  { id: 3, name: "course3" },
-];
+  try {
+    // 1. Buscar usuario por nombre
+    const [usuarios] = await db.query(
+      "SELECT * FROM Usuario WHERE nombre = ?",
+      [nombre]
+    );
+    if (!usuarios.length)
+      return res.status(401).json({ error: "Credenciales inválidas" });
 
-app.get("/", (req, res) => {
-  res.send("Hello World");
-});
+    const usuario = usuarios[0];
 
-app.get("/api/courses", (req, res) => {
-  res.send(courses);
-});
+    // 2. Verificar contraseña
+    const passwordValida = await bcrypt.compare(
+      password,
+      usuario.contrasena_hash
+    );
+    if (!passwordValida)
+      return res.status(401).json({ error: "Credenciales inválidas" });
 
-app.get("/api/courses/:id", (req, res) => {
-  const course = courses.find((c) => c.id === parseInt(req.params.id));
-  if (!course)
-    return res.status(404).send("The course with the given ID was not found");
-  res.send(course);
-});
+    // 3. Obtener SuperUsuario asociado al profesional
+    const [superUsuario] = await db.query(
+      `SELECT sp.ID_SuperUsuario 
+       FROM SuperUsuario_Usuario sp
+       WHERE sp.ID_Usuario = ?`,
+      [usuario.ID_profesional]
+    );
+    if (!superUsuario.length)
+      return res
+        .status(403)
+        .json({ error: "No estás asociado a ninguna institución" });
 
-app.post("/api/courses", (req, res) => {
-  const { error } = validateCourse(req.body);
-  if (error) {
-    return res.status(400).send(result.error.details[0].message);
+    const ID_SuperUsuario = superUsuario[0].ID_SuperUsuario;
+
+    // 4. Obtener licencia activa de la institución
+    const [licencias] = await db.query(
+      `SELECT tipo_licencia 
+       FROM Licencia 
+       WHERE ID_SuperUsuario = ? 
+         AND estado = 'active' 
+         AND fecha_baja >= CURDATE()`,
+      [ID_SuperUsuario]
+    );
+    if (!licencias.length)
+      return res
+        .status(403)
+        .json({ error: "La institución no tiene licencia activa" });
+
+    // 5. Devolver el tipo de licencia
+    res.json({ tipoLicencia: licencias[0].tipo_licencia });
+  } catch (err) {
+    console.error("Error en /login:", err);
+    res.status(500).json({ error: "Error interno del servidor" });
   }
-  const course = {
-    id: courses.length + 1,
-    name: req.body.name,
-  };
-  courses.push(course);
-  res.send(course);
 });
-
-const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(`Listening on port ${port}...`));
-
-app.put("/api/courses/:id", (req, res) => {
-  const course = courses.find((c) => c.id === parseInt(req.params.id));
-  if (!course) {
-    res.status(404).send("The course with the given ID was not found");
-    return;
-  }
-
-  const { error } = validateCourse(req.body);
-  if (error) {
-    return res.status(400).send(result.error.details[0].message);
-  }
-
-  course.name = req.body.name;
-  res.send(course);
-});
-
-function validateCourse(course) {
-  const schema = {
-    name: Joi.string().min(3).required(),
-  };
-  return Joi.validate(course, schema);
-}
-
-app.delete("/api/courses/:id", (req, res) => {
-  // Look up the course
-  // Not existing, return 404
-  // Delete
-  // Return the same course
-  const course = courses.find((c) => c.id === parseInt(req.params.id));
-  if (!course)
-    return res.status(404).send("The course with the given ID was not found");
-
-  const index = courses.indexOf(course);
-  courses.splice(index, 1);
-  res.send(course);
-});
-
-*/
