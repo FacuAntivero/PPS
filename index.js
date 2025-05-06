@@ -7,25 +7,19 @@ app.use(express.json());
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log(`Listening on port ${port}...`));
 
-// Esquemas de validación Joi
-const licenseSchema = Joi.object({
-  name: Joi.string().min(3).required(),
-  type: Joi.string().valid("basic", "premium", "enterprise").required(),
-  expirationDate: Joi.date().iso().greater("now").required(),
-  status: Joi.string().valid("active", "inactive").default("active"),
-});
-
-const updateLicenseSchema = Joi.object({
-  name: Joi.string().min(3),
-  type: Joi.string().valid("basic", "premium", "enterprise"),
-  expirationDate: Joi.date().iso().greater("now"),
-  status: Joi.string().valid("active", "inactive"),
-}).min(1); // Al menos un campo debe ser enviado
-
 // EndPoint Login
 const loginSchema = Joi.object({
   nombre: Joi.string().required(),
   password: Joi.string().required(),
+});
+
+// Esquema de validación Joi para creación de usuarios
+const usuarioSchema = Joi.object({
+  nombre: Joi.string().min(3).required(),
+  rol: Joi.string()
+    .valid("terapeuta", "supervisor", "administrador")
+    .required(),
+  password: Joi.string().min(6).required(),
 });
 
 app.post("/login", async (req, res) => {
@@ -89,3 +83,99 @@ app.post("/login", async (req, res) => {
     res.status(500).json({ error: "Error interno del servidor" });
   }
 });
+
+// Middleware de autenticación JWT
+const authenticateJWT = (req, res, next) => {
+  const token = req.headers.authorization?.split(" ")[1];
+
+  if (!token) {
+    return res.status(401).json({ error: "Acceso no autorizado" });
+  }
+
+  jwt.verify(token, "tu_clave_secreta", (err, decoded) => {
+    if (err) {
+      return res.status(403).json({ error: "Token inválido o expirado" });
+    }
+
+    // Verificar que el usuario tenga licencia admin
+    if (decoded.licenseType !== "admin") {
+      return res
+        .status(403)
+        .json({ error: "No tienes permisos para esta acción" });
+    }
+
+    req.superUsuarioId = decoded.superUsuarioId;
+    next();
+  });
+};
+
+// Endpoint para crear usuarios
+app.post(
+  "/usuarios",
+  authenticateJWT, // Verifica JWT
+  validate(usuarioSchema), // Valida datos con Joi
+  async (req, res) => {
+    const { nombre, rol, password } = req.body;
+    const { superUsuarioId } = req;
+
+    try {
+      // 1. Verificar existencia del SuperUsuario
+      const [superUsuario] = await db.query(
+        "SELECT * FROM SuperUsuario WHERE ID_SuperUsuario = ?",
+        [superUsuarioId]
+      );
+
+      if (!superUsuario.length) {
+        return res.status(404).json({ error: "Institución no encontrada" });
+      }
+
+      // 2. Hashear contraseña
+      const hashedPassword = await bcrypt.hash(password, 10);
+
+      // 3. Crear usuario en transacción
+      const connection = await db.getConnection();
+      await connection.beginTransaction();
+
+      try {
+        // Insertar usuario
+        const [usuarioResult] = await connection.query(
+          `INSERT INTO Usuario 
+           (nombre, rol, contrasena_hash) 
+           VALUES (?, ?, ?)`,
+          [nombre, rol, hashedPassword]
+        );
+
+        // Vincular con SuperUsuario
+        await connection.query(
+          `INSERT INTO SuperUsuario_Profesional 
+           (ID_SuperUsuario, ID_Usuario) 
+           VALUES (?, ?)`,
+          [superUsuarioId, usuarioResult.insertId]
+        );
+
+        await connection.commit();
+
+        res.status(201).json({
+          id: usuarioResult.insertId,
+          nombre,
+          rol,
+          institucion: superUsuario[0].nombre,
+        });
+      } catch (error) {
+        await connection.rollback();
+        throw error;
+      } finally {
+        connection.release();
+      }
+    } catch (error) {
+      console.error("Error en creación de usuario:", error);
+
+      // Manejar errores de duplicados
+      if (error.code === "ER_DUP_ENTRY") {
+        return res.status(400).json({ error: "El usuario ya existe" });
+      }
+
+      res.status(500).json({ error: "Error interno del servidor" });
+    }
+  }
+);
