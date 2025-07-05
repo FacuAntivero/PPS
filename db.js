@@ -47,7 +47,7 @@ db.all = function (sql, params = []) {
 // Función para inicializar la base de datos
 async function initializeDatabase() {
   try {
-    // Crear tablas
+    // Tabla SuperUser
     await db.run(`
       CREATE TABLE IF NOT EXISTS SuperUser (
         superUser TEXT PRIMARY KEY,
@@ -56,6 +56,7 @@ async function initializeDatabase() {
       )
     `);
 
+    // Tabla User
     await db.run(`
       CREATE TABLE IF NOT EXISTS User (
         user TEXT NOT NULL,
@@ -67,6 +68,7 @@ async function initializeDatabase() {
       )
     `);
 
+    // Tabla Hash
     await db.run(`
       CREATE TABLE IF NOT EXISTS Hash (
         superUser TEXT NOT NULL,
@@ -76,20 +78,23 @@ async function initializeDatabase() {
       )
     `);
 
+    // Tabla Sesion
     await db.run(`
       CREATE TABLE IF NOT EXISTS Sesion (
         id_sesion INTEGER PRIMARY KEY AUTOINCREMENT,
-        nombre TEXT NOT NULL,
-        superUser TEXT NOT NULL,
+        paciente TEXT NOT NULL,  
+        user TEXT NOT NULL,      
+        superUser TEXT NOT NULL, 
         inicio DATETIME NOT NULL,
         fin DATETIME,
         estadoInicial TEXT NOT NULL,
         estadoFinal TEXT,
-        FOREIGN KEY (nombre, superUser) REFERENCES Paciente(nombre, superUser),
+        FOREIGN KEY (user, superUser) REFERENCES User(user, superUser),
         FOREIGN KEY (superUser) REFERENCES SuperUser(superUser)
       )
     `);
 
+    // Tabla Ejercicio
     await db.run(`
       CREATE TABLE IF NOT EXISTS Ejercicio (
         id_ejercicio INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -101,6 +106,7 @@ async function initializeDatabase() {
       )
     `);
 
+    // Tabla Metrica
     await db.run(`
       CREATE TABLE IF NOT EXISTS Metrica (
         id_metrica INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -111,6 +117,7 @@ async function initializeDatabase() {
       )
     `);
 
+    // Tabla License
     await db.run(`
       CREATE TABLE IF NOT EXISTS License (
         id_license INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -123,26 +130,15 @@ async function initializeDatabase() {
       )
     `);
 
-    await db.run(`
-      CREATE TABLE IF NOT EXISTS Paciente (
-        nombre TEXT,
-        superUser TEXT NOT NULL,
-        fechaNacimiento DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        anotaciones TEXT,
-        PRIMARY KEY (nombre, superUser),
-        FOREIGN KEY (superUser) REFERENCES SuperUser(superUser)
-      )
-    `);
-
     console.log("Todas las tablas creadas/verificadas");
 
-    // 🚫 Superusuario eliminado
-    // const hashed = await bcrypt.hash("admin123", 10);
-    // await db.run(
-    //   "INSERT OR IGNORE INTO SuperUser (superUser, password) VALUES (?, ?)",
-    //   ["admin", hashed]
-    // );
-    // console.log("Superusuario 'admin' insertado o ya existente");
+    // Insertar superusuario admin por defecto
+    const hashed = await bcrypt.hash("admin123", 10);
+    await db.run(
+      "INSERT OR IGNORE INTO SuperUser (superUser, password, cant_usuarios_permitidos) VALUES (?, ?, ?)",
+      ["admin", hashed, 10] // Límite de 10 usuarios
+    );
+    console.log("Superusuario 'admin' insertado o ya existente");
   } catch (err) {
     console.error("Error al inicializar la base de datos:", err);
   }

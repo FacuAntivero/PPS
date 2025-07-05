@@ -9,7 +9,80 @@ app.use(express.json());
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log(`Listening on port ${port}...`));
 
-const loginSchema = Joi.object({
+const superUserLoginSchema = Joi.object({
+  usuario: Joi.string().min(3).required().messages({
+    "string.empty": "El nombre de superusuario es requerido",
+    "string.min": "El nombre debe tener al menos 3 caracteres",
+    "any.required": "El nombre de superusuario es obligatorio",
+  }),
+  password: Joi.string().min(6).required().messages({
+    "string.empty": "La contraseña es requerida",
+    "string.min": "La contraseña debe tener al menos 6 caracteres",
+    "any.required": "La contraseña es obligatoria",
+  }),
+});
+
+app.post("/login-superuser", async (req, res) => {
+  try {
+    // Validar estructura de los datos
+    const { error } = superUserLoginSchema.validate(req.body);
+    if (error) {
+      return res.status(400).json({
+        success: false,
+        error: error.details[0].message,
+      });
+    }
+
+    const { usuario, password } = req.body;
+
+    // Buscar superusuario
+    const superUser = await db.get(
+      "SELECT password FROM SuperUser WHERE superUser = ?",
+      [usuario]
+    );
+
+    if (!superUser) {
+      return res.status(401).json({
+        success: false,
+        error: "Credenciales inválidas",
+      });
+    }
+
+    // Comparar contraseña
+    const match = await bcrypt.compare(password, superUser.password);
+    if (!match) {
+      return res.status(401).json({
+        success: false,
+        error: "Credenciales inválidas",
+      });
+    }
+
+    // Obtener tipo de licencia
+    const license = await db.get(
+      `SELECT tipo_licencia 
+       FROM License 
+       WHERE superUser = ? 
+         AND estado = 'activa'
+       ORDER BY fecha_alta DESC 
+       LIMIT 1`,
+      [usuario]
+    );
+
+    res.status(200).json({
+      success: true,
+      tipo_licencia: license ? license.tipo_licencia : null,
+    });
+  } catch (error) {
+    console.error("Error en login-superuser:", error);
+    res.status(500).json({
+      success: false,
+      error: "Error interno del servidor",
+    });
+  }
+});
+
+// Esquema para login de User (profesional)
+const userLoginSchema = Joi.object({
   usuario: Joi.string().min(3).required().messages({
     "string.empty": "El nombre de usuario es requerido",
     "string.min": "El nombre debe tener al menos 3 caracteres",
@@ -22,10 +95,11 @@ const loginSchema = Joi.object({
   }),
 });
 
-app.post("/login", async (req, res) => {
+// Endpoint para login de User (profesional)
+app.post("/login-user", async (req, res) => {
   try {
     // Validar estructura de los datos
-    const { error } = loginSchema.validate(req.body);
+    const { error } = userLoginSchema.validate(req.body);
     if (error) {
       return res.status(400).json({
         success: false,
@@ -35,59 +109,34 @@ app.post("/login", async (req, res) => {
 
     const { usuario, password } = req.body;
 
-    // 1. Primero intentar autenticar como SuperUser
-    const superUserResult = await db.get(
-      "SELECT password FROM SuperUser WHERE superUser = ?",
+    // Buscar usuario profesional
+    const user = await db.get(
+      "SELECT password, superUser FROM User WHERE user = ?",
       [usuario]
     );
 
-    if (superUserResult) {
-      const match = await bcrypt.compare(password, superUserResult.password);
-      if (match) {
-        // Obtener tipo de licencia
-        const license = await db.get(
-          `SELECT tipo_licencia 
-           FROM License 
-           WHERE superUser = ? 
-             AND estado = 'activa'
-           ORDER BY fecha_alta DESC 
-           LIMIT 1`,
-          [usuario]
-        );
-
-        return res.status(200).json({
-          success: true,
-          message: "Soy un SuperUser",
-          tipo_licencia: license ? license.tipo_licencia : null,
-        });
-      }
+    if (!user) {
+      return res.status(401).json({
+        success: false,
+        error: "Credenciales inválidas",
+      });
     }
 
-    // 2. Si no es SuperUser, intentar como User normal
-    const userResult = await db.get(
-      `SELECT password 
-       FROM User 
-       WHERE user = ?`,
-      [usuario]
-    );
-
-    if (userResult) {
-      const match = await bcrypt.compare(password, userResult.password);
-      if (match) {
-        return res.status(200).json({
-          success: true,
-          message: "Soy un User",
-        });
-      }
+    // Comparar contraseña
+    const match = await bcrypt.compare(password, user.password);
+    if (!match) {
+      return res.status(401).json({
+        success: false,
+        error: "Credenciales inválidas",
+      });
     }
 
-    // 3. Si ninguna credencial es válida
-    return res.status(401).json({
-      success: false,
-      error: "Credenciales inválidas",
+    res.status(200).json({
+      success: true,
+      superUser: user.superUser, // Residencia a la que pertenece
     });
   } catch (error) {
-    console.error("Error en login:", error);
+    console.error("Error en login-user:", error);
     res.status(500).json({
       success: false,
       error: "Error interno del servidor",
@@ -427,9 +476,10 @@ app.post("/usuarios", async (req, res) => {
 // Endpoint para crear sesiones
 app.post("/sesiones", async (req, res) => {
   try {
+    // Cambiamos "nombre" por "paciente" en el request
     const { paciente, user, superUser, estadoInicial } = req.body;
 
-    // Verificar existencia del usuario
+    // Verificar existencia del usuario profesional
     const usuario = await db.get(
       "SELECT user FROM User WHERE user = ? AND superUser = ?",
       [user, superUser]
@@ -438,16 +488,16 @@ app.post("/sesiones", async (req, res) => {
     if (!usuario) {
       return res.status(404).json({
         success: false,
-        error: "Usuario no encontrado",
+        error: "Usuario profesional no encontrado",
       });
     }
 
-    // Insertar nueva sesión
+    // Insertar nueva sesión con campo "paciente"
     const result = await db.run(
-      `INSERT INTO Sesion
-   (nombre, superUser, inicio, estadoInicial)
-   VALUES (?, ?, datetime('now'), ?)`,
-      [paciente, superUser, estadoInicial]
+      `INSERT INTO Sesion 
+       (paciente, user, superUser, inicio, estadoInicial) 
+       VALUES (?, ?, ?, datetime('now'), ?)`,
+      [paciente, user, superUser, estadoInicial]
     );
 
     res.status(201).json({
@@ -459,7 +509,7 @@ app.post("/sesiones", async (req, res) => {
     console.error("Error en POST /sesiones:", error);
     res.status(500).json({
       success: false,
-      error: "Error al iniciar sesión",
+      error: "Error al iniciar sesión terapéutica",
     });
   }
 });
@@ -564,6 +614,170 @@ app.post("/metricas", async (req, res) => {
     res.status(500).json({
       success: false,
       error: "Error al registrar métrica",
+    });
+  }
+});
+
+// Esquema para devolver las metricas de un paciente
+const metricasPacienteSchema = Joi.object({
+  paciente: Joi.string().min(1).required().messages({
+    "string.empty": "El nombre del paciente es requerido",
+    "any.required": "El paciente es obligatorio",
+  }),
+  user: Joi.string().min(1).required().messages({
+    "string.empty": "El usuario profesional es requerido",
+    "any.required": "El usuario profesional es obligatorio",
+  }),
+  superUser: Joi.string().min(1).required().messages({
+    "string.empty": "El superusuario es requerido",
+    "any.required": "El superusuario es obligatorio",
+  }),
+});
+
+app.get("/metricas-paciente", async (req, res) => {
+  try {
+    // Validar parámetros de query
+    const { error, value } = metricasPacienteSchema.validate(req.query);
+    if (error) {
+      return res.status(400).json({
+        success: false,
+        error: error.details[0].message,
+      });
+    }
+
+    const { paciente, user, superUser } = value;
+
+    // 1. Verificar que exista la combinación paciente-user-superUser en Sesion
+    const sesiones = await db.all(
+      `SELECT id_sesion 
+       FROM Sesion 
+       WHERE paciente = ? 
+         AND user = ? 
+         AND superUser = ?`,
+      [paciente, user, superUser]
+    );
+
+    if (sesiones.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: "No se encontraron sesiones para este paciente y profesional",
+      });
+    }
+
+    // 2. Obtener todas las métricas relacionadas
+    const metricas = await db.all(
+      `SELECT 
+        M.id_metrica,
+        M.nombre AS nombre_metrica,
+        M.data,
+        E.escena,
+        E.inicio AS inicio_ejercicio,
+        E.fin AS fin_ejercicio,
+        S.inicio AS inicio_sesion,
+        S.fin AS fin_sesion,
+        S.estadoInicial,
+        S.estadoFinal
+      FROM Metrica M
+      JOIN Ejercicio E ON M.id_ejercicio = E.id_ejercicio
+      JOIN Sesion S ON E.id_sesion = S.id_sesion
+      WHERE S.paciente = ? 
+        AND S.user = ? 
+        AND S.superUser = ?`,
+      [paciente, user, superUser]
+    );
+
+    if (metricas.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: "No se encontraron métricas para este paciente",
+      });
+    }
+
+    // 3. Formatear respuesta
+    const resultado = metricas.map((metrica) => ({
+      id_metrica: metrica.id_metrica,
+      nombre: metrica.nombre_metrica,
+      data: JSON.parse(metrica.data), // Convertir de string JSON a objeto
+      ejercicio: {
+        escena: metrica.escena,
+        inicio: metrica.inicio_ejercicio,
+        fin: metrica.fin_ejercicio,
+      },
+      sesion: {
+        inicio: metrica.inicio_sesion,
+        fin: metrica.fin_sesion,
+        estadoInicial: metrica.estadoInicial,
+        estadoFinal: metrica.estadoFinal,
+      },
+    }));
+
+    res.status(200).json({
+      success: true,
+      paciente,
+      profesional: user,
+      residencia: superUser,
+      metricas: resultado,
+    });
+  } catch (error) {
+    console.error("Error en GET /metricas-paciente:", error);
+    res.status(500).json({
+      success: false,
+      error: "Error interno del servidor",
+    });
+  }
+});
+
+// Esquema de validación para devolver los user de un SuperUser
+const superUserParamSchema = Joi.string().min(3).required().messages({
+  "string.empty": "superUser no puede estar vacío",
+  "string.min": "superUser debe tener al menos 3 caracteres",
+  "any.required": "superUser es obligatorio",
+});
+
+// Endpoint para obtener todos los usuarios asociados a un SuperUser
+app.get("/superuser/:superUser/usuarios", async (req, res) => {
+  try {
+    const { superUser } = req.params;
+
+    // Validar parámetro de ruta
+    const { error } = superUserParamSchema.validate(superUser);
+    if (error) {
+      return res.status(400).json({
+        success: false,
+        error: error.details[0].message,
+      });
+    }
+
+    // Verificar si el superusuario existe
+    const superUserExists = await db.get(
+      "SELECT superUser FROM SuperUser WHERE superUser = ?",
+      [superUser]
+    );
+
+    if (!superUserExists) {
+      return res.status(404).json({
+        success: false,
+        error: "El superusuario no existe",
+      });
+    }
+
+    // Obtener todos los usuarios asociados al superusuario
+    const usuarios = await db.all(
+      "SELECT user, nombreReal FROM User WHERE superUser = ?",
+      [superUser]
+    );
+
+    res.status(200).json({
+      success: true,
+      superUser,
+      total_usuarios: usuarios.length,
+      usuarios,
+    });
+  } catch (error) {
+    console.error("Error en GET /superuser/:superUser/usuarios:", error);
+    res.status(500).json({
+      success: false,
+      error: "Error interno del servidor",
     });
   }
 });
