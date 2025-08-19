@@ -131,14 +131,6 @@ async function initializeDatabase() {
     `);
 
     console.log("Todas las tablas creadas/verificadas");
-
-    // Insertar superusuario admin por defecto
-    const hashed = await bcrypt.hash("admin123", 10);
-    await db.run(
-      "INSERT OR IGNORE INTO SuperUser (superUser, password, cant_usuarios_permitidos) VALUES (?, ?, ?)",
-      ["admin", hashed, 10] // Límite de 10 usuarios
-    );
-    console.log("Superusuario 'admin' insertado o ya existente");
   } catch (err) {
     console.error("Error al inicializar la base de datos:", err);
   }
