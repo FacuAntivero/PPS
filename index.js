@@ -22,6 +22,50 @@ const superUserLoginSchema = Joi.object({
   }),
 });
 
+// Registrar nueva residencia (SuperUser)
+app.post("/superuser", async (req, res) => {
+  const schema = Joi.object({
+    superUser: Joi.string().min(3).required(),
+    password: Joi.string().min(6).required(),
+    cant_usuarios_permitidos: Joi.number().integer().min(1).required(),
+  });
+
+  // Validación de datos
+  const { error, value } = schema.validate(req.body);
+  if (error)
+    return res.status(400).json({
+      success: false,
+      error: error.details[0].message,
+    });
+
+  try {
+    // Hashear contraseña
+    const hashedPassword = await bcrypt.hash(value.password, 10);
+
+    // Insertar en base de datos
+    await db.run(
+      `INSERT INTO SuperUser (superUser, password, cant_usuarios_permitidos) 
+             VALUES (?, ?, ?)`,
+      [value.superUser, hashedPassword, value.cant_usuarios_permitidos]
+    );
+
+    res.status(201).json({ success: true });
+  } catch (err) {
+    if (err.message.includes("UNIQUE constraint")) {
+      res.status(409).json({
+        success: false,
+        error: "El nombre de residencia ya existe",
+      });
+    } else {
+      console.error("Error en registro de residencia:", err);
+      res.status(500).json({
+        success: false,
+        error: "Error interno del servidor",
+      });
+    }
+  }
+});
+
 app.post("/login-superuser", async (req, res) => {
   try {
     // Validar estructura de los datos

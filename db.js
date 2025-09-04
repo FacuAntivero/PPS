@@ -1,8 +1,10 @@
 const sqlite3 = require("sqlite3").verbose();
 const bcrypt = require("bcrypt");
+require("dotenv").config();
 
 // Crear instancia de base de datos
-const db = new sqlite3.Database("./database.sqlite", (err) => {
+const dbPath = process.env.DB_PATH || "./database.sqlite";
+const db = new sqlite3.Database(dbPath, (err) => {
   if (err) {
     console.error("Error al conectar con SQLite:", err);
   } else {
@@ -129,6 +131,52 @@ async function initializeDatabase() {
         FOREIGN KEY (superUser) REFERENCES SuperUser(superUser)
       )
     `);
+
+    // Crear SuperUser inicial desde .env (solo si no existe)
+    if (process.env.ADMIN_USER && process.env.ADMIN_PASS) {
+      const admin = await db.get(
+        "SELECT * FROM SuperUser WHERE superUser = ?",
+        [process.env.ADMIN_USER]
+      );
+
+      if (!admin) {
+        const saltRounds = parseInt(process.env.BCRYPT_SALT_ROUNDS) || 10;
+        const hashedPassword = await bcrypt.hash(
+          process.env.ADMIN_PASS,
+          saltRounds
+        );
+
+        await db.run(
+          `INSERT INTO SuperUser (superUser, password, cant_usuarios_permitidos)
+ VALUES (?, ?, ?)`,
+          [
+            process.env.ADMIN_USER,
+            hashedPassword,
+            process.env.ADMIN_MAX_USERS || 10,
+          ]
+        );
+
+        console.log(`SuperUser inicial creado: ${process.env.ADMIN_USER}`);
+      }
+
+      // Crear licencia inicial si no existe
+      const existingLicense = await db.get(
+        "SELECT id_license FROM License WHERE superUser = ?",
+        [process.env.ADMIN_USER]
+      );
+
+      if (!existingLicense) {
+        await db.run(
+          `INSERT INTO License (superUser, tipo_licencia)
+       VALUES (?, ?)`,
+          [process.env.ADMIN_USER, process.env.ADMIN_LICENSE_TYPE || "basica"]
+        );
+
+        console.log(
+          `Licencia inicial creada para SuperUser: ${process.env.ADMIN_USER}`
+        );
+      }
+    }
 
     console.log("Todas las tablas creadas/verificadas");
   } catch (err) {
