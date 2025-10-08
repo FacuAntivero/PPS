@@ -48,6 +48,12 @@ app.post("/superuser", async (req, res) => {
              VALUES (?, ?, ?)`,
       [value.superUser, hashedPassword, value.cant_usuarios_permitidos]
     );
+    
+    await db.run(
+      `INSERT INTO License (superUser, tipo_licencia, estado) VALUES (?, 'basica', 'activa')`,
+      [value.superUser]
+    );
+
 
     res.status(201).json({ success: true });
   } catch (err) {
