@@ -114,6 +114,12 @@ app.post("/license/generate", async (req, res) => {
        VALUES (?, ?, ?, 'pendiente', ?, datetime('now'))`,
       [keyHash, tipo_licencia, finalMax, notas]
     );
+    
+    await db.run(
+      `INSERT INTO License (superUser, tipo_licencia, estado) VALUES (?, 'basica', 'activa')`,
+      [value.superUser]
+    );
+
 
     // Mostrar la clave en claro solo una vez (guardar en backoffice)
     res.status(201).json({
