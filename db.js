@@ -1,8 +1,8 @@
+// db.js
 const sqlite3 = require("sqlite3").verbose();
 const bcrypt = require("bcrypt");
 require("dotenv").config();
 
-// Crear instancia de base de datos
 const dbPath = process.env.DB_PATH || "./database.sqlite";
 const db = new sqlite3.Database(dbPath, (err) => {
   if (err) {
@@ -13,12 +13,10 @@ const db = new sqlite3.Database(dbPath, (err) => {
   }
 });
 
-// Guardar métodos originales
 const originalRun = db.run.bind(db);
 const originalGet = db.get.bind(db);
 const originalAll = db.all.bind(db);
 
-// Crear versiones promisificadas
 db.run = function (sql, params = []) {
   return new Promise((resolve, reject) => {
     originalRun(sql, params, function (err) {
@@ -46,19 +44,19 @@ db.all = function (sql, params = []) {
   });
 };
 
-// Función para inicializar la base de datos
 async function initializeDatabase() {
   try {
-    // Tabla SuperUser
+    // SuperUser: cant_usuarios_permitidos nullable (fallback) y license_id para trazabilidad
     await db.run(`
       CREATE TABLE IF NOT EXISTS SuperUser (
         superUser TEXT PRIMARY KEY,
         password TEXT NOT NULL,
-        cant_usuarios_permitidos INTEGER NOT NULL
+        cant_usuarios_permitidos INTEGER,
+        license_id INTEGER
       )
     `);
 
-    // Tabla User
+    // User
     await db.run(`
       CREATE TABLE IF NOT EXISTS User (
         user TEXT NOT NULL,
@@ -70,23 +68,13 @@ async function initializeDatabase() {
       )
     `);
 
-    // Tabla Hash
-    await db.run(`
-      CREATE TABLE IF NOT EXISTS Hash (
-        superUser TEXT NOT NULL,
-        hash TEXT NOT NULL,
-        PRIMARY KEY (superUser, hash),
-        FOREIGN KEY (superUser) REFERENCES SuperUser(superUser)
-      )
-    `);
-
-    // Tabla Sesion
+    // Sesion
     await db.run(`
       CREATE TABLE IF NOT EXISTS Sesion (
         id_sesion INTEGER PRIMARY KEY AUTOINCREMENT,
-        paciente TEXT NOT NULL,  
-        user TEXT NOT NULL,      
-        superUser TEXT NOT NULL, 
+        paciente TEXT NOT NULL,
+        user TEXT NOT NULL,
+        superUser TEXT NOT NULL,
         inicio DATETIME NOT NULL,
         fin DATETIME,
         estadoInicial TEXT NOT NULL,
@@ -96,7 +84,7 @@ async function initializeDatabase() {
       )
     `);
 
-    // Tabla Ejercicio
+    // Ejercicio
     await db.run(`
       CREATE TABLE IF NOT EXISTS Ejercicio (
         id_ejercicio INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -108,7 +96,7 @@ async function initializeDatabase() {
       )
     `);
 
-    // Tabla Metrica
+    // Metrica
     await db.run(`
       CREATE TABLE IF NOT EXISTS Metrica (
         id_metrica INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -119,20 +107,23 @@ async function initializeDatabase() {
       )
     `);
 
-    // Tabla License
     await db.run(`
       CREATE TABLE IF NOT EXISTS License (
         id_license INTEGER PRIMARY KEY AUTOINCREMENT,
-        superUser TEXT NOT NULL,
-        fecha_alta DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        fecha_baja DATETIME,
-        estado TEXT CHECK(estado IN ('activa', 'expirada', 'cancelada')) DEFAULT 'activa',
-        tipo_licencia TEXT CHECK(tipo_licencia IN ('basica', 'premium')) DEFAULT 'basica',
+        key_hash TEXT UNIQUE,
+        tipo_licencia TEXT CHECK(tipo_licencia IN ('basica','mediana','pro','custom')) DEFAULT 'basica',
+        max_usuarios INTEGER,
+        estado TEXT CHECK(estado IN ('pendiente','activa','revocada','expirada')) DEFAULT 'pendiente',
+        fecha_generacion DATETIME DEFAULT CURRENT_TIMESTAMP,
+        fecha_activacion DATETIME,
+        fecha_expiracion DATETIME,
+        superUser TEXT,
+        notas TEXT,
         FOREIGN KEY (superUser) REFERENCES SuperUser(superUser)
       )
     `);
 
-    // Crear SuperUser inicial desde .env (solo si no existe)
+    // Crear SuperUser admin inicial desde .env (solo si no existe)
     if (process.env.ADMIN_USER && process.env.ADMIN_PASS) {
       const admin = await db.get(
         "SELECT * FROM SuperUser WHERE superUser = ?",
@@ -148,18 +139,20 @@ async function initializeDatabase() {
 
         await db.run(
           `INSERT INTO SuperUser (superUser, password, cant_usuarios_permitidos)
- VALUES (?, ?, ?)`,
+           VALUES (?, ?, ?)`,
           [
             process.env.ADMIN_USER,
             hashedPassword,
-            process.env.ADMIN_MAX_USERS || 10,
+            process.env.ADMIN_MAX_USERS
+              ? parseInt(process.env.ADMIN_MAX_USERS)
+              : null,
           ]
         );
 
         console.log(`SuperUser inicial creado: ${process.env.ADMIN_USER}`);
       }
 
-      // Crear licencia inicial si no existe
+      // Crear licencia inicial asociada si no existe (sin key_hash)
       const existingLicense = await db.get(
         "SELECT id_license FROM License WHERE superUser = ?",
         [process.env.ADMIN_USER]
@@ -167,9 +160,15 @@ async function initializeDatabase() {
 
       if (!existingLicense) {
         await db.run(
-          `INSERT INTO License (superUser, tipo_licencia)
-       VALUES (?, ?)`,
-          [process.env.ADMIN_USER, process.env.ADMIN_LICENSE_TYPE || "basica"]
+          `INSERT INTO License (superUser, tipo_licencia, max_usuarios, estado, fecha_activacion)
+           VALUES (?, ?, ?, 'activa', datetime('now'))`,
+          [
+            process.env.ADMIN_USER,
+            process.env.ADMIN_LICENSE_TYPE || "basica",
+            process.env.ADMIN_MAX_USERS
+              ? parseInt(process.env.ADMIN_MAX_USERS)
+              : null,
+          ]
         );
 
         console.log(
