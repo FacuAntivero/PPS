@@ -151,30 +151,6 @@ async function initializeDatabase() {
 
         console.log(`SuperUser inicial creado: ${process.env.ADMIN_USER}`);
       }
-
-      // Crear licencia inicial asociada si no existe (sin key_hash)
-      const existingLicense = await db.get(
-        "SELECT id_license FROM License WHERE superUser = ?",
-        [process.env.ADMIN_USER]
-      );
-
-      if (!existingLicense) {
-        await db.run(
-          `INSERT INTO License (superUser, tipo_licencia, max_usuarios, estado, fecha_activacion)
-           VALUES (?, ?, ?, 'activa', datetime('now'))`,
-          [
-            process.env.ADMIN_USER,
-            process.env.ADMIN_LICENSE_TYPE || "basica",
-            process.env.ADMIN_MAX_USERS
-              ? parseInt(process.env.ADMIN_MAX_USERS)
-              : null,
-          ]
-        );
-
-        console.log(
-          `Licencia inicial creada para SuperUser: ${process.env.ADMIN_USER}`
-        );
-      }
     }
 
     console.log("Todas las tablas creadas/verificadas");

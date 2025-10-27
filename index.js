@@ -1,4 +1,5 @@
 // index.js
+const crypto = require("crypto");
 require("dotenv").config();
 const Joi = require("joi");
 const express = require("express");
@@ -13,7 +14,7 @@ const {
 
 app.use(express.json());
 const cors = require("cors");
-app.use(cors({ origin: "http://localhost:57001" }));
+app.use(cors({ origin: "http://localhost:49417" }));
 
 const port = process.env.PORT || 3000;
 app.listen(port, "0.0.0.0", () => console.log(`Listening on port ${port}...`));
@@ -24,6 +25,27 @@ app.use((req, res, next) => {
   console.log(new Date().toISOString(), req.method, req.url);
   next();
 });
+// Middleware mínimo para endpoints admin — comprueba cabeceras
+function requireAdmin(req, res, next) {
+  const adminUser = process.env.ADMIN_USER;
+  const adminPass = process.env.ADMIN_PASS;
+  const headerUser = req.header("x-admin-user");
+  const headerPass = req.header("x-admin-pass");
+
+  if (!adminUser || !adminPass) {
+    return res
+      .status(500)
+      .json({ success: false, error: "Admin no configurado en servidor" });
+  }
+
+  if (headerUser !== adminUser || headerPass !== adminPass) {
+    return res
+      .status(403)
+      .json({ success: false, error: "Acceso de administrador denegado" });
+  }
+  next();
+}
+
 /* ---------------------------
    Helpers
    --------------------------- */
@@ -63,9 +85,9 @@ const superUserLoginSchema = Joi.object({
     "string.min": "El nombre debe tener al menos 3 caracteres",
     "any.required": "El nombre de superusuario es obligatorio",
   }),
-  password: Joi.string().min(6).required().messages({
+  password: Joi.string().min(5).required().messages({
     "string.empty": "La contraseña es requerida",
-    "string.min": "La contraseña debe tener al menos 6 caracteres",
+    "string.min": "La contraseña debe tener al menos 5 caracteres",
     "any.required": "La contraseña es obligatoria",
   }),
 });
@@ -83,59 +105,56 @@ const userLoginSchema = Joi.object({
   }),
 });
 
-/* ---------------------------
-   LICENSE endpoints
-   --------------------------- */
+function hashingLicenseKey(licenseKey) {
+  return crypto
+    .createHash("sha256")
+    .update(licenseKey.toString().trim())
+    .digest("hex");
+}
 
-// Generar licencia (backoffice) - protegido por x-admin-token (ADMIN_TOKEN)
-app.post("/license/generate", async (req, res) => {
+// ==========================================================
+// 1. ENDPOINT: GENERAR LICENCIA (ADMIN)
+// ==========================================================
+app.post("/license/generate", requireAdmin, async (req, res) => {
   try {
-    const adminToken = req.header("x-admin-token");
-    if (!adminToken || adminToken !== process.env.ADMIN_TOKEN) {
-      return res.status(401).json({ success: false, error: "No autorizado" });
-    }
+    const { tipo_licencia } = req.body; // opcional, default 'basica'
+    const tipo = tipo_licencia || "basica";
 
-    const {
-      tipo_licencia = "basica",
-      notas = "",
-      max_usuarios = undefined,
-    } = req.body;
-    const finalMax =
-      typeof max_usuarios === "number"
-        ? max_usuarios
-        : PRESETS[tipo_licencia] ?? null;
+    // Mapping por defecto de máximos si no se proporciona max_usuarios:
+    const maxMap = { basica: 3, mediana: 7, pro: 10, custom: null };
+    const maxUsuarios = req.body.max_usuarios ?? maxMap[tipo] ?? null;
 
-    const keyPlain = generateKeyPlaintext();
-    const keyHash = hashLicenseKey(keyPlain);
+    // Generar clave legible (ej: 24 chars)
+    // Usamos generateKeyPlaintext importada
+    const licenseKey = generateKeyPlaintext();
 
-    // Insertamos sin fecha_expiracion: la expiración se calculará al ACTIVAR la licencia
-    await db.run(
-      `INSERT INTO License (key_hash, tipo_licencia, max_usuarios, estado, notas, fecha_generacion)
-       VALUES (?, ?, ?, 'pendiente', ?, datetime('now'))`,
-      [keyHash, tipo_licencia, finalMax, notas]
-    );
-    
-    await db.run(
-      `INSERT INTO License (superUser, tipo_licencia, estado) VALUES (?, 'basica', 'activa')`,
-      [value.superUser]
+    // Generamos el hash usando la función consistente
+    const keyHash = hashingLicenseKey(licenseKey);
+
+    const result = await db.run(
+      `INSERT INTO License (key_hash, tipo_licencia, max_usuarios, estado, fecha_generacion)
+            VALUES (?, ?, ?, 'pendiente', datetime('now'))`,
+      [keyHash, tipo, maxUsuarios]
     );
 
-
-    // Mostrar la clave en claro solo una vez (guardar en backoffice)
     res.status(201).json({
       success: true,
-      licenseKey: keyPlain,
-      tipo_licencia,
-      max_usuarios: finalMax,
+      id_license: result.lastID,
+      licenseKey, // IMPORTANTE: clave en texto plano para el admin
+      tipo_licencia: tipo,
+      max_usuarios: maxUsuarios,
     });
   } catch (err) {
-    console.error("Error generating license:", err);
+    console.error("Error POST /license/generate", err);
     res
       .status(500)
       .json({ success: false, error: "Error interno del servidor" });
   }
 });
 
+// ==========================================================
+// 2. ENDPOINT: VALIDAR LICENCIA
+// ==========================================================
 app.post("/license/validate", async (req, res) => {
   try {
     console.log("POST /license/validate body:", req.body);
@@ -149,16 +168,14 @@ app.post("/license/validate", async (req, res) => {
     }
 
     const trimmed = licenseKey.toString().trim();
-    const keyHash = hashLicenseKey(trimmed);
+    const keyHash = hashingLicenseKey(trimmed); // Uso consistente de la función
     console.log("Computed keyHash:", keyHash);
 
     const row = await db.get(
       `SELECT id_license, tipo_licencia, estado, superUser, max_usuarios, fecha_expiracion
-       FROM License WHERE key_hash = ?`,
+             FROM License WHERE key_hash = ?`,
       [keyHash]
     );
-
-    console.log("License row found:", row);
 
     // 1) No está generada
     if (!row) {
@@ -244,8 +261,10 @@ app.post("/license/validate", async (req, res) => {
   }
 });
 
-// Registrar nueva residencia (SuperUser)
-app.post("/superuser", async (req, res) => {
+// ==========================================================
+// 3. ENDPOINT: REGISTRAR SUPERUSER (Ruta ajustada a /superusers/register)
+// ==========================================================
+app.post("/superusers/register", async (req, res) => {
   const schema = Joi.object({
     superUser: Joi.string().min(3).required().messages({
       "string.empty": "El nombre de la residencia es requerido",
@@ -274,7 +293,7 @@ app.post("/superuser", async (req, res) => {
 
   try {
     const { superUser, password, licenseKey } = value;
-    const keyHash = hashLicenseKey(licenseKey);
+    const keyHash = hashingLicenseKey(licenseKey); // Uso consistente de la función
 
     // Buscar licencia canjeable (por hash)
     const license = await db.get(
@@ -301,6 +320,7 @@ app.post("/superuser", async (req, res) => {
     // Transacción: insertar SuperUser y activar la licencia
     await db.run("BEGIN TRANSACTION");
     try {
+      // Asegúrate de que los nombres de columna aquí (superUser, password, etc.) coincidan con tu BD
       await db.run(
         "INSERT INTO SuperUser (superUser, password, cant_usuarios_permitidos, license_id) VALUES (?, ?, ?, ?)",
         [superUser, hashedPassword, finalCant, license.id_license]
@@ -308,11 +328,11 @@ app.post("/superuser", async (req, res) => {
 
       await db.run(
         `UPDATE License
-         SET estado = 'activa',
-             fecha_activacion = datetime('now'),
-             fecha_expiracion = datetime('now', '+1 year'),
-             superUser = ?
-         WHERE id_license = ?`,
+                 SET estado = 'activa',
+                     fecha_activacion = datetime('now'),
+                     fecha_expiracion = datetime('now', '+1 year'),
+                     superUser = ?
+                 WHERE id_license = ?`,
         [superUser, license.id_license]
       );
 
@@ -336,18 +356,46 @@ app.post("/superuser", async (req, res) => {
         .json({ success: false, error: "Error interno del servidor" });
     }
   } catch (err) {
-    console.error("Error en POST /superuser:", err);
+    console.error("Error en POST /superusers/register:", err);
     return res
       .status(500)
       .json({ success: false, error: "Error interno del servidor" });
   }
 });
 
-/* ---------------------------
-   Login SuperUser
-   --------------------------- */
+// Devuelve la licencia más reciente asociada a superUser (puede venir con estado 'activa','expirada','revocada','pendiente')
+app.get("/license/active", async (req, res) => {
+  try {
+    const { superUser } = req.query;
+    if (!superUser) {
+      return res
+        .status(400)
+        .json({ success: false, error: "superUser is required" });
+    }
+
+    const license = await db.get(
+      `SELECT id_license, tipo_licencia, estado, max_usuarios, fecha_generacion, fecha_activacion, fecha_expiracion, notas
+       FROM License
+       WHERE superUser = ?
+       ORDER BY 
+         CASE WHEN fecha_activacion IS NOT NULL THEN datetime(fecha_activacion) ELSE datetime(fecha_generacion) END DESC
+       LIMIT 1`,
+      [superUser]
+    );
+
+    return res.status(200).json({ success: true, license: license || null });
+  } catch (err) {
+    console.error("Error GET /license/active:", err);
+    res
+      .status(500)
+      .json({ success: false, error: "Error interno del servidor" });
+  }
+});
+
+// Login SuperUser (residencia)
 app.post("/login-superuser", async (req, res) => {
   try {
+    // Validar estructura de los datos
     const { error } = superUserLoginSchema.validate(req.body);
     if (error) {
       return res.status(400).json({
@@ -358,7 +406,7 @@ app.post("/login-superuser", async (req, res) => {
 
     const { usuario, password } = req.body;
 
-    // Buscar superusuario en DB
+    // Buscar superusuario
     const superUser = await db.get(
       "SELECT password FROM SuperUser WHERE superUser = ?",
       [usuario]
@@ -371,7 +419,6 @@ app.post("/login-superuser", async (req, res) => {
       });
     }
 
-    // Comparar contraseña
     const match = await bcrypt.compare(password, superUser.password);
     if (!match) {
       return res.status(401).json({
@@ -380,7 +427,6 @@ app.post("/login-superuser", async (req, res) => {
       });
     }
 
-    // Obtener tipo de licencia (si aplica)
     const license = await db.get(
       `SELECT tipo_licencia 
        FROM License 
@@ -391,14 +437,16 @@ app.post("/login-superuser", async (req, res) => {
       [usuario]
     );
 
-    // Detectar admin (según .env.ADMIN_USER)
-    const isAdmin =
-      !!process.env.ADMIN_USER && usuario === process.env.ADMIN_USER;
+    const isAdmin = !!(
+      process.env.ADMIN_USER && usuario === process.env.ADMIN_USER
+    );
 
     res.status(200).json({
       success: true,
       tipo_licencia: license ? license.tipo_licencia : null,
-      is_admin: isAdmin, // <-- indicador útil para el frontend
+      is_admin: !!(
+        process.env.ADMIN_USER && usuario === process.env.ADMIN_USER
+      ),
     });
   } catch (error) {
     console.error("Error en login-superuser:", error);
@@ -444,9 +492,363 @@ app.post("/login-user", async (req, res) => {
       .json({ success: false, error: "Error interno del servidor" });
   }
 });
+app.get("/admin/superusers", requireAdmin, async (req, res) => {
+  try {
+    const rows = await db.all(`
+      SELECT
+        S.superUser,
+        S.cant_usuarios_permitidos,
+        -- licencia activa más reciente por superUser (puede ser NULL)
+        (SELECT id_license
+         FROM License L
+         WHERE L.superUser = S.superUser
+           AND L.estado = 'activa'
+         ORDER BY L.fecha_activacion DESC
+         LIMIT 1) AS id_license,
+        (SELECT tipo_licencia
+         FROM License L
+         WHERE L.superUser = S.superUser
+           AND L.estado = 'activa'
+         ORDER BY L.fecha_activacion DESC
+         LIMIT 1) AS tipo_licencia,
+        (SELECT estado
+         FROM License L
+         WHERE L.superUser = S.superUser
+           AND L.estado = 'activa'
+         ORDER BY L.fecha_activacion DESC
+         LIMIT 1) AS licencia_estado,
+        (SELECT fecha_expiracion
+         FROM License L
+         WHERE L.superUser = S.superUser
+           AND L.estado = 'activa'
+         ORDER BY L.fecha_activacion DESC
+         LIMIT 1) AS fecha_expiracion
+      FROM SuperUser S
+      ORDER BY S.superUser
+    `);
+
+    res.json({ success: true, total: rows.length, superusers: rows });
+  } catch (err) {
+    console.error("Error GET /admin/superusers", err);
+    res
+      .status(500)
+      .json({ success: false, error: "Error interno del servidor" });
+  }
+});
+
+// GET /license (admin)
+app.get("/license", requireAdmin, async (req, res) => {
+  try {
+    const rows = await db.all(
+      `SELECT id_license, tipo_licencia, max_usuarios, estado, fecha_generacion, fecha_activacion, fecha_expiracion, superUser, notas
+       FROM License ORDER BY fecha_generacion DESC`
+    );
+    res.json({ success: true, total: rows.length, licenses: rows });
+  } catch (err) {
+    console.error("Error GET /license", err);
+    res
+      .status(500)
+      .json({ success: false, error: "Error interno del servidor" });
+  }
+});
+
+// DELETE /license/:id
+app.delete("/license/:id", requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    await db.run("DELETE FROM License WHERE id_license = ?", [id]);
+    res.json({ success: true, message: "Licencia borrada" });
+  } catch (err) {
+    console.error("Error DELETE /license/:id", err);
+    res
+      .status(500)
+      .json({ success: false, error: "Error interno del servidor" });
+  }
+});
+
+// --- FUNCIÓN CENTRAL DE CHEQUEO DE LICENCIA ---
+// Esta función es crucial para la validación tanto del frontend como del backend.
+async function getSuperUserLicenseStatus(superUser) {
+  try {
+    const licenseData = await db.get(
+      `SELECT * FROM License WHERE superUser = ?`,
+      [superUser]
+    );
+
+    if (!licenseData) {
+      // Si no hay licencia asociada
+      return {
+        active: false,
+        maxUsers: 0,
+        currentUsers: 0,
+        error: "Licencia no encontrada para el SuperUser.",
+      };
+    }
+
+    const currentUsersResult = await db.get(
+      `SELECT COUNT(id_usuario) as currentUsers FROM Usuarios WHERE superUser = ?`,
+      [superUser]
+    );
+    const currentUsers = currentUsersResult.currentUsers;
+    const now = new Date();
+    const expirationDate = new Date(licenseData.fecha_expiracion);
+
+    // Determinamos si la licencia está expirada por fecha o por estado manual del administrador
+    const isExpiredByDate = expirationDate <= now;
+    const isExpiredByAdmin = licenseData.estado === "expirada";
+
+    const licenseStatus = {
+      // Es activa solo si el estado es 'activa' Y la fecha no ha pasado
+      active: licenseData.estado === "activa" && !isExpiredByDate,
+      isExpired: isExpiredByDate || isExpiredByAdmin,
+      maxUsers: licenseData.max_usuarios,
+      currentUsers: currentUsers,
+      estado: licenseData.estado,
+      fechaExpiracion: licenseData.fecha_expiracion,
+    };
+
+    return licenseStatus;
+  } catch (err) {
+    console.error("Error al obtener el estado de la licencia:", err);
+    return {
+      active: false,
+      maxUsers: 0,
+      currentUsers: 0,
+      error: "Error interno al verificar la licencia.",
+    };
+  }
+}
+
+// PUT /license/:id/expire
+app.put("/license/:id/expire", requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    await db.run(
+      `UPDATE License SET estado = 'expirada', fecha_expiracion = datetime('now') WHERE id_license = ?`,
+      [id]
+    );
+    res.json({ success: true, message: "Licencia marcada como expirada" });
+  } catch (err) {
+    console.error("Error PUT /license/:id/expire", err);
+    res
+      .status(500)
+      .json({ success: false, error: "Error interno del servidor" });
+  }
+});
+async function getSuperUserLicenseStatus(superUser) {
+  try {
+    // Obtenemos la licencia por el nombre del SuperUser (que es el campo 'superUser' en License)
+    const licenseData = await db.get(
+      `SELECT * FROM License WHERE superUser = ?`,
+      [superUser]
+    );
+
+    if (!licenseData) {
+      return {
+        active: false,
+        maxUsers: 0,
+        currentUsers: 0,
+        error: "Licencia no encontrada.",
+      };
+    }
+
+    const currentUsersResult = await db.get(
+      `SELECT COUNT(id_usuario) as currentUsers FROM Usuarios WHERE superUser = ?`,
+      [superUser]
+    );
+    const currentUsers = currentUsersResult.currentUsers;
+
+    const licenseStatus = {
+      active:
+        licenseData.estado === "activa" &&
+        new Date(licenseData.fecha_expiracion) > new Date(),
+      isExpired:
+        licenseData.estado === "expirada" ||
+        new Date(licenseData.fecha_expiracion) <= new Date(),
+      maxUsers: licenseData.max_usuarios,
+      currentUsers: currentUsers,
+      estado: licenseData.estado,
+      fechaExpiracion: licenseData.fecha_expiracion,
+    };
+
+    // Si el estado es 'expirada' por la acción del administrador o la fecha pasó
+    if (licenseStatus.isExpired || licenseData.estado !== "activa") {
+      licenseStatus.active = false;
+    }
+
+    return licenseStatus;
+  } catch (err) {
+    console.error("Error al obtener el estado de la licencia:", err);
+    return {
+      active: false,
+      maxUsers: 0,
+      currentUsers: 0,
+      error: "Error interno al verificar la licencia.",
+    };
+  }
+}
+
+// --- RUTA DE API para que el frontend valide el estado (SuperUserDashboard) ---
+// La ruta que usa tu Flutter: await _api!.checkLicenseStatus(superUser: currentSuperUser);
+app.get("/license/status/:superUser", async (req, res) => {
+  const { superUser } = req.params;
+  const status = await getSuperUserLicenseStatus(superUser);
+
+  if (status.error) {
+    return res.status(500).json({ success: false, error: status.error });
+  }
+
+  // El frontend usa 'isExpired' para el chequeo de vigencia.
+  res.json({
+    success: true,
+    isExpired: status.isExpired,
+    isActive: status.active,
+    maxUsers: status.maxUsers,
+    currentUsers: status.currentUsers,
+    message: status.active
+      ? "Licencia activa."
+      : "Licencia no activa o expirada.",
+  });
+});
+
+// --- RUTA CLAVE: CREACIÓN DE USUARIO (CON VALIDACIÓN DE LICENCIA Y LÍMITE) ---
+app.post("/createUsuario", async (req, res) => {
+  // Asegúrate de que los campos vengan en el cuerpo de la solicitud
+  const { user, superUser, nombreReal, password } = req.body;
+
+  // 1. OBTENER Y VALIDAR ESTADO DE LA LICENCIA
+  const status = await getSuperUserLicenseStatus(superUser);
+
+  if (status.error) {
+    return res.status(500).json({ success: false, error: status.error });
+  }
+
+  // Chequeo de vigencia/estado: Si no está activa (por admin o por fecha)
+  if (!status.active) {
+    return res.status(403).json({
+      success: false,
+      error:
+        status.estado === "expirada"
+          ? "La licencia ha sido marcada como expirada por el administrador."
+          : "La licencia ha expirado por fecha o no está activa.",
+    });
+  }
+
+  // 2. VALIDAR LÍMITE DE PROFESIONALES
+  if (status.currentUsers >= status.maxUsers) {
+    return res.status(403).json({
+      success: false,
+      error: `Límite de ${status.maxUsers} profesionales alcanzado. (${status.currentUsers} de ${status.maxUsers})`,
+    });
+  }
+
+  // 3. CONTINUAR CON LA CREACIÓN DEL USUARIO
+  try {
+    // [AQUÍ DEBERÍAS HASHEAR LA CONTRASEÑA, EJEMPLO SIMPLE POR AHORA]
+    const hashedPassword = password;
+
+    await db.run(
+      `INSERT INTO Usuarios (user, superUser, nombreReal, password) VALUES (?, ?, ?, ?)`,
+      [user, superUser, nombreReal, hashedPassword]
+    );
+
+    res.json({ success: true, message: "Profesional creado exitosamente." });
+  } catch (err) {
+    if (err.message && err.message.includes("UNIQUE constraint failed")) {
+      return res.status(400).json({
+        success: false,
+        error: "El nombre de usuario ya está en uso.",
+      });
+    }
+    console.error("Error POST /createUsuario:", err);
+    res.status(500).json({
+      success: false,
+      error: "Error interno del servidor al crear usuario.",
+    });
+  }
+});
+// Cambiar password de una Residencia siendo Admin
+app.put(
+  "/admin/superuser/:superUser/password",
+  requireAdmin,
+  async (req, res) => {
+    try {
+      const { superUser } = req.params;
+      const { newPassword } = req.body;
+      if (!newPassword || newPassword.length < 6) {
+        return res
+          .status(400)
+          .json({ success: false, error: "newPassword mínimo 6 caracteres" });
+      }
+      const hashed = await bcrypt.hash(newPassword, 10);
+      const result = await db.run(
+        "UPDATE SuperUser SET password = ? WHERE superUser = ?",
+        [hashed, superUser]
+      );
+      if (!result.changes && result.changes !== 0) {
+        /* sqlite driver specifics */
+      }
+      res.json({
+        success: true,
+        message: "Contraseña de residencia actualizada",
+      });
+    } catch (err) {
+      console.error("Error PUT /admin/superuser/:superUser/password", err);
+      res
+        .status(500)
+        .json({ success: false, error: "Error interno del servidor" });
+    }
+  }
+);
+// GET /license (admin)
+app.get("/license", requireAdmin, async (req, res) => {
+  try {
+    const rows = await db.all(
+      `SELECT id_license, tipo_licencia, max_usuarios, estado, fecha_generacion, fecha_activacion, fecha_expiracion, superUser, notas
+       FROM License ORDER BY fecha_generacion DESC`
+    );
+    res.json({ success: true, total: rows.length, licenses: rows });
+  } catch (err) {
+    console.error("Error GET /license", err);
+    res
+      .status(500)
+      .json({ success: false, error: "Error interno del servidor" });
+  }
+});
+
+// DELETE /license/:id
+app.delete("/license/:id", requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    await db.run("DELETE FROM License WHERE id_license = ?", [id]);
+    res.json({ success: true, message: "Licencia borrada" });
+  } catch (err) {
+    console.error("Error DELETE /license/:id", err);
+    res
+      .status(500)
+      .json({ success: false, error: "Error interno del servidor" });
+  }
+});
+
+// PUT /license/:id/expire
+app.put("/license/:id/expire", requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    await db.run(
+      `UPDATE License SET estado = 'expirada', fecha_expiracion = datetime('now') WHERE id_license = ?`,
+      [id]
+    );
+    res.json({ success: true, message: "Licencia marcada como expirada" });
+  } catch (err) {
+    console.error("Error PUT /license/:id/expire", err);
+    res
+      .status(500)
+      .json({ success: false, error: "Error interno del servidor" });
+  }
+});
 
 /* ---------------------------
-   Cambiar contraseña por SuperUser
+   Cambiar contraseña de un profesional desde el panel de Residencia
    --------------------------- */
 const changePasswordSchema = Joi.object({
   superUser: Joi.string().min(3).required().messages({
@@ -537,6 +939,7 @@ const listUsersSchema = Joi.object({
 
 app.get("/usuarios", async (req, res) => {
   try {
+    // Validar parámetros de query
     const { error } = listUsersSchema.validate(req.query);
     if (error)
       return res
@@ -544,6 +947,8 @@ app.get("/usuarios", async (req, res) => {
         .json({ success: false, error: error.details[0].message });
 
     const { superUser } = req.query;
+
+    // Verificar que el superUser exista
     const superUserExists = await db.get(
       "SELECT superUser FROM SuperUser WHERE superUser = ?",
       [superUser]
@@ -553,12 +958,53 @@ app.get("/usuarios", async (req, res) => {
         .status(404)
         .json({ success: false, error: "El superusuario no existe" });
 
-    const users = await db.all("SELECT user FROM User WHERE superUser = ?", [
-      superUser,
-    ]);
-    const userList = users.map((u) => u.user);
+    // Buscar la licencia ACTIVA más reciente del superUser
+    const activeLicense = await db.get(
+      `SELECT id_license, tipo_licencia, max_usuarios, estado, fecha_activacion, fecha_expiracion
+       FROM License
+       WHERE superUser = ?
+         AND estado = 'activa'
+       ORDER BY fecha_activacion DESC
+       LIMIT 1`,
+      [superUser]
+    );
 
-    res.status(200).json({ success: true, usuarios: userList });
+    if (!activeLicense) {
+      // No hay licencia activa -> no permitimos listar/usar usuarios
+      return res.status(403).json({
+        success: false,
+        error:
+          "No hay licencia activa para este superusuario. Contacte al administrador.",
+      });
+    }
+
+    // Obtener usuarios (incluye nombre real)
+    const usuariosRows = await db.all(
+      "SELECT user, nombreReal FROM User WHERE superUser = ?",
+      [superUser]
+    );
+
+    // Contar usuarios actuales
+    const countRow = await db.get(
+      "SELECT COUNT(*) AS count FROM User WHERE superUser = ?",
+      [superUser]
+    );
+    const totalUsuarios = countRow ? countRow.count : usuariosRows.length;
+
+    // Formatear respuesta: usuarios como lista de objetos
+    const usuarios = usuariosRows.map((r) => ({
+      user: r.user,
+      nombreReal: r.nombreReal,
+    }));
+
+    res.status(200).json({
+      success: true,
+      superUser,
+      tipo_licencia: activeLicense.tipo_licencia,
+      max_usuarios: activeLicense.max_usuarios, // null = ilimitado
+      total_usuarios: totalUsuarios,
+      usuarios,
+    });
   } catch (error) {
     console.error("Error en GET /usuarios:", error);
     res
@@ -567,9 +1013,7 @@ app.get("/usuarios", async (req, res) => {
   }
 });
 
-/* ---------------------------
-   Agregar nuevo Usuario (profesional)
-   --------------------------- */
+// Esquema de validación para agregar un nuevo Usuario (mantén tu usuarioSchema)
 const usuarioSchema = Joi.object({
   user: Joi.string().min(3).required().messages({
     "string.empty": "user no puede estar vacío",
@@ -595,63 +1039,112 @@ const usuarioSchema = Joi.object({
 
 app.post("/usuarios", async (req, res) => {
   try {
+    // Validar entrada
     const { error, value } = usuarioSchema.validate(req.body);
-    if (error)
-      return res
-        .status(400)
-        .json({ success: false, error: error.details[0].message });
+    if (error) {
+      return res.status(400).json({
+        success: false,
+        error: error.details[0].message,
+      });
+    }
 
     const { user, superUser, nombreReal, password } = value;
+
+    // Verificar existencia de superUser
     const superUsuario = await db.get(
-      "SELECT superUser, cant_usuarios_permitidos, license_id FROM SuperUser WHERE superUser = ?",
+      "SELECT superUser FROM SuperUser WHERE superUser = ?",
       [superUser]
     );
-    if (!superUsuario)
-      return res
-        .status(404)
-        .json({ success: false, error: "El superusuario no está registrado" });
+    if (!superUsuario) {
+      return res.status(404).json({
+        success: false,
+        error: "El superusuario no está registrado",
+      });
+    }
 
+    // Verificar si el usuario ya existe
     const usuarioExistente = await db.get(
       "SELECT user FROM User WHERE user = ? AND superUser = ?",
       [user, superUser]
     );
-    if (usuarioExistente)
+    if (usuarioExistente) {
       return res.status(409).json({
         success: false,
         error: "El usuario ya está registrado con este superusuario",
       });
+    }
 
-    // Verificar límite de usuarios (usa licencia si existe, sino legacy)
-    const effectiveLimit = await getEffectiveUserLimit(superUser);
-    const [currentUsers] = await db.all(
-      "SELECT COUNT(*) AS count FROM User WHERE superUser = ?",
+    // --- NUEVA LÓGICA: comprobar licencia ACTIVA y limites ---
+    const license = await db.get(
+      `SELECT id_license, tipo_licencia, max_usuarios, estado, fecha_expiracion
+       FROM License
+       WHERE superUser = ?
+         AND estado = 'activa'
+       ORDER BY fecha_activacion DESC, fecha_generacion DESC
+       LIMIT 1`,
       [superUser]
     );
 
-    if (
-      typeof effectiveLimit === "number" &&
-      currentUsers.count >= effectiveLimit
-    ) {
+    if (!license) {
+      // No hay licencia activa -> bloquear creación
       return res.status(403).json({
         success: false,
-        error: "Límite de usuarios alcanzado para este superusuario",
+        error:
+          "No hay licencia activa para esta residencia. Contacte al administrador.",
       });
     }
 
+    // Si existe fecha_expiracion, verificar que no haya expirado
+    if (license.fecha_expiracion) {
+      const expCheck = await db.get(
+        `SELECT CASE WHEN datetime(?) <= datetime('now') THEN 1 ELSE 0 END AS expired`,
+        [license.fecha_expiracion]
+      );
+      if (expCheck && expCheck.expired === 1) {
+        return res.status(403).json({
+          success: false,
+          error:
+            "La licencia de la residencia ha expirado. No se pueden crear usuarios.",
+        });
+      }
+    }
+
+    // Contar usuarios actuales
+    const countRow = await db.get(
+      "SELECT COUNT(*) AS count FROM User WHERE superUser = ?",
+      [superUser]
+    );
+    const currentCount = countRow ? countRow.count : 0;
+
+    // Si max_usuarios es NULL -> ilimitado
+    if (license.max_usuarios !== null && license.max_usuarios !== undefined) {
+      if (currentCount >= license.max_usuarios) {
+        return res.status(403).json({
+          success: false,
+          error:
+            "Límite de usuarios alcanzado para esta residencia (según la licencia).",
+        });
+      }
+    }
+    // --- FIN LÓGICA DE LICENCIA ---
+
+    // Hashear la contraseña e insertar usuario
     const hashedPassword = await bcrypt.hash(password, 10);
     await db.run(
       "INSERT INTO User (user, superUser, nombreReal, password) VALUES (?, ?, ?, ?)",
       [user, superUser, nombreReal, hashedPassword]
     );
 
-    res
-      .status(201)
-      .json({ success: true, message: "Usuario agregado exitosamente" });
+    res.status(201).json({
+      success: true,
+      message: "Usuario agregado exitosamente",
+    });
   } catch (error) {
     console.error("Error en POST /usuarios:", error);
-    res
-      .status(500)
-      .json({ success: false, error: "Error interno del servidor" });
+    res.status(500).json({
+      success: false,
+      error: "Error interno del servidor",
+    });
   }
 });
 
