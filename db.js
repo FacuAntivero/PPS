@@ -79,6 +79,7 @@ async function initializeDatabase() {
         fin DATETIME,
         estadoInicial TEXT NOT NULL,
         estadoFinal TEXT,
+        comentarios TEXT,
         FOREIGN KEY (user, superUser) REFERENCES User(user, superUser),
         FOREIGN KEY (superUser) REFERENCES SuperUser(superUser)
       )
@@ -111,9 +112,9 @@ async function initializeDatabase() {
       CREATE TABLE IF NOT EXISTS License (
         id_license INTEGER PRIMARY KEY AUTOINCREMENT,
         key_hash TEXT UNIQUE,
-        tipo_licencia TEXT CHECK(tipo_licencia IN ('basica','mediana','pro','custom')) DEFAULT 'basica',
+        tipo_licencia TEXT CHECK(tipo_licencia IN ('basica','mediana','pro','personalizada')) DEFAULT 'basica',
         max_usuarios INTEGER,
-        estado TEXT CHECK(estado IN ('pendiente','activa','revocada','expirada')) DEFAULT 'pendiente',
+        estado TEXT CHECK(estado IN ('pendiente','activa','expirada')) DEFAULT 'pendiente',
         fecha_generacion DATETIME DEFAULT CURRENT_TIMESTAMP,
         fecha_activacion DATETIME,
         fecha_expiracion DATETIME,

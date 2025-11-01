@@ -14,7 +14,7 @@ const {
 
 app.use(express.json());
 const cors = require("cors");
-app.use(cors({ origin: ["http://localhost:59531"] }));
+app.use(cors({ origin: ["http://localhost:53521"] }));
 
 const port = process.env.PORT || 3000;
 app.listen(port, "0.0.0.0", () => console.log(`Listening on port ${port}...`));
@@ -502,8 +502,6 @@ app.post("/login-user", async (req, res) => {
       .json({ success: false, error: "Error interno del servidor" });
   }
 });
-
-// GET /admin/superusers (lista de SuperUsers con estado de licencia)
 app.get("/admin/superusers", requireAdmin, async (req, res) => {
   try {
     const rows = await db.all(`
@@ -851,6 +849,52 @@ app.delete("/admin/superuser/:superUser", requireAdmin, async (req, res) => {
       .json({ success: false, error: "Error interno del servidor" });
   }
 });
+// GET /license (admin)
+app.get("/license", requireAdmin, async (req, res) => {
+  try {
+    const rows = await db.all(
+      `SELECT id_license, tipo_licencia, max_usuarios, estado, fecha_generacion, fecha_activacion, fecha_expiracion, superUser, notas
+       FROM License ORDER BY fecha_generacion DESC`
+    );
+    res.json({ success: true, total: rows.length, licenses: rows });
+  } catch (err) {
+    console.error("Error GET /license", err);
+    res
+      .status(500)
+      .json({ success: false, error: "Error interno del servidor" });
+  }
+});
+
+// DELETE /license/:id
+app.delete("/license/:id", requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    await db.run("DELETE FROM License WHERE id_license = ?", [id]);
+    res.json({ success: true, message: "Licencia borrada" });
+  } catch (err) {
+    console.error("Error DELETE /license/:id", err);
+    res
+      .status(500)
+      .json({ success: false, error: "Error interno del servidor" });
+  }
+});
+
+// PUT /license/:id/expire
+app.put("/license/:id/expire", requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    await db.run(
+      `UPDATE License SET estado = 'expirada', fecha_expiracion = datetime('now') WHERE id_license = ?`,
+      [id]
+    );
+    res.json({ success: true, message: "Licencia marcada como expirada" });
+  } catch (err) {
+    console.error("Error PUT /license/:id/expire", err);
+    res
+      .status(500)
+      .json({ success: false, error: "Error interno del servidor" });
+  }
+});
 
 /* ---------------------------
    Cambiar contraseña de un profesional desde el panel de Residencia
@@ -1130,6 +1174,7 @@ app.post("/usuarios", async (req, res) => {
         });
       }
     }
+    // --- FIN LÓGICA DE LICENCIA ---
 
     // Hashear la contraseña e insertar usuario
     const hashedPassword = await bcrypt.hash(password, 10);
@@ -1257,35 +1302,27 @@ app.put("/license/:id/modify-type", requireAdmin, async (req, res) => {
 });
 
 /// -----------------------------------------------------------------
-/// ENDPOINT 1: RECIBIR Y GUARDAR (Llamado por la App Externa/Postman)
+/// ENDPOINT 1: RECIBIR Y GUARDAR (Llamado por la App Externa/Oculus)
 /// -----------------------------------------------------------------
-// (Este endpoint ya está corregido para incluir todos los campos de la tabla Sesion)
+// Este endpoint escucha en POST, recibe el JSON completo de la sesión.
+// Se asume que la app externa te envía el JSON en 'req.body'.
+// (Opcional: protegerlo con una API Key simple usando 'requireApiKey')
+
 app.post(
   "/session/save",
   /* requireApiKey, */ async (req, res) => {
     const { sesion, ejercicios } = req.body;
 
-    // Validación básica
+    // Validación básica del JSON recibido
     if (!sesion || !sesion.paciente || !sesion.profesional) {
       return res
         .status(400)
         .json({ success: false, error: "Datos de sesión incompletos." });
     }
 
-    const {
-      paciente,
-      profesional,
-      inicio,
-      fin,
-      estadoInicial,
-      estadoFinal,
-      comentarios,
-    } = sesion;
-
-    // 1. Buscar el SuperUser asociado a ese Profesional
+    const { paciente, profesional, inicio, fin } = sesion;
     let superUser;
     try {
-      // (Esta tabla 'User' es un ejemplo, usa tu tabla de usuarios real)
       const userRow = await db.get(
         `SELECT superUser FROM User WHERE user = ?`,
         [profesional]
@@ -1302,29 +1339,20 @@ app.post(
         .json({ success: false, error: "Error al buscar SuperUser" });
     }
 
-    // 2. Iniciar Transacción
     try {
       await db.run("BEGIN TRANSACTION");
 
-      // 3. Insertar la Sesion
+      // 1. Insertar la Sesion
       const resultSesion = await db.run(
-        `INSERT INTO Sesion (paciente, user, superUser, inicio, fin, estadoInicial, estadoFinal, comentarios)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, // <-- 8 campos
-        [
-          paciente,
-          profesional,
-          superUser,
-          inicio,
-          fin,
-          estadoInicial,
-          estadoFinal,
-          comentarios,
-        ]
+        `INSERT INTO Sesion (paciente, user, superUser, inicio, fin)
+       VALUES (?, ?, ?, ?, ?)`,
+        [paciente, profesional, superUser, inicio, fin]
       );
 
+      // Obtenemos el ID de la sesión que acabamos de insertar
       const id_sesion = resultSesion.lastID;
 
-      // 4. Insertar Ejercicios (si existen)
+      // 2. Iterar e insertar los Ejercicios
       if (ejercicios && ejercicios.length > 0) {
         for (const ejercicio of ejercicios) {
           const { escena, inicio, fin, metricas } = ejercicio;
@@ -1337,11 +1365,12 @@ app.post(
 
           const id_ejercicio = resultEjercicio.lastID;
 
-          // 5. Insertar Metricas (si existen)
+          // 3. Iterar e insertar las Metricas
           if (metricas && metricas.length > 0) {
             for (const metrica of metricas) {
               const { nombre, data } = metrica;
-              // Guardamos el array 'data' (que viene del JSON) como un string JSON en la BD
+
+              // Guardamos el array 'data' como un string JSON
               const dataString = JSON.stringify(data);
 
               await db.run(
@@ -1354,17 +1383,16 @@ app.post(
         }
       }
 
-      // 6. Confirmar Transacción
       await db.run("COMMIT");
       res.status(201).json({
         success: true,
-        message: "Sesión y métricas guardadas correctamente",
+        message: "Sesión guardada localmente",
         sesionId: id_sesion,
       });
     } catch (err) {
-      // 7. Revertir en caso de error
+      // Si algo falla, revertimos todo
       await db.run("ROLLBACK");
-      console.error("Error en POST /api/session/save:", err.message);
+      console.error("Error en POST /session/save:", err.message);
       res
         .status(500)
         .json({ success: false, error: "Error al guardar la sesión en la BD" });
@@ -1376,26 +1404,31 @@ app.post(
 /// ENDPOINT 2: LEER Y ENVIAR (Llamado por tu App de Flutter)
 /// -----------------------------------------------------------------
 // Este endpoint consulta la BD y rearma el JSON anidado
+// que tu app de Flutter espera.
+// (Opcional: protégelo con tu sistema de login JWT/requireAuth)
+
 app.get(
   "/sessions/:profesional",
   /* requireAuth, */ async (req, res) => {
     const { profesional } = req.params;
 
     try {
-      // 1. Obtenemos todas las sesiones (Esto ya trae todos los campos)
+      // 1. Obtenemos todas las sesiones de ese profesional
       const sesiones = await db.all(
         `SELECT * FROM Sesion WHERE user = ? ORDER BY inicio DESC`,
         [profesional]
       );
 
       if (sesiones.length === 0) {
-        return res.json([]);
+        return res.json([]); // Devuelve lista vacía si no hay sesiones
       }
 
+      // 2. Preparamos el array de respuesta final
       const sesionesData = [];
 
+      // 3. Iteramos por cada sesión para buscar sus hijos (ejercicios y métricas)
       for (const sesion of sesiones) {
-        // 4. Buscamos los ejercicios (Sin cambios)
+        // 4. Buscamos los ejercicios de esta sesión
         const ejercicios = await db.all(
           `SELECT * FROM Ejercicio WHERE id_sesion = ?`,
           [sesion.id_sesion]
@@ -1403,9 +1436,9 @@ app.get(
 
         const ejerciciosData = [];
 
-        // 5. Iteramos por cada ejercicio (Sin cambios)
+        // 5. Iteramos por cada ejercicio para buscar sus métricas
         for (const ejercicio of ejercicios) {
-          // 6. Buscamos las métricas (Sin cambios)
+          // 6. Buscamos las métricas de este ejercicio
           const metricas = await db.all(
             `SELECT id_metrica, nombre, data, id_ejercicio FROM Metrica WHERE id_ejercicio = ?`,
             [ejercicio.id_ejercicio]
@@ -1415,6 +1448,7 @@ app.get(
             id: m.id_metrica,
             ejercicio: m.id_ejercicio,
             nombre: m.nombre,
+
             data: m.data,
           }));
 
@@ -1428,16 +1462,14 @@ app.get(
           });
         }
 
+        // 7. Construimos el objeto SesionData (el formato que espera el frontend)
         sesionesData.push({
           sesion: {
             id: sesion.id_sesion,
             paciente: sesion.paciente,
-            profesional: sesion.user,
+            profesional: sesion.user, // Aseguramos que los nombres coincidan
             inicio: sesion.inicio,
             fin: sesion.fin,
-            estadoInicial: sesion.estadoInicial,
-            estadoFinal: sesion.estadoFinal,
-            comentarios: sesion.comentarios,
           },
           ejercicios: ejerciciosData,
         });
