@@ -1,4 +1,3 @@
-// index.js
 const crypto = require("crypto");
 require("dotenv").config();
 const Joi = require("joi");
@@ -14,7 +13,7 @@ const {
 
 app.use(express.json());
 const cors = require("cors");
-app.use(cors({ origin: ["http://localhost:59531"] }));
+app.use(cors({ origin: ["http://localhost:61774"] }));
 
 const port = process.env.PORT || 3000;
 app.listen(port, "0.0.0.0", () => console.log(`Listening on port ${port}...`));
@@ -122,9 +121,7 @@ function hashingLicenseKey(licenseKey) {
     .digest("hex");
 }
 
-// ==========================================================
-// 1. ENDPOINT: GENERAR LICENCIA (ADMIN)
-// ==========================================================
+// GENERAR LICENCIA (ADMIN)
 app.post("/license/generate", requireAdmin, async (req, res) => {
   try {
     const { tipo_licencia } = req.body; // opcional, default 'basica'
@@ -162,9 +159,7 @@ app.post("/license/generate", requireAdmin, async (req, res) => {
   }
 });
 
-// ==========================================================
-// 2. ENDPOINT: VALIDAR LICENCIA
-// ==========================================================
+// ENDPOINT: VALIDAR LICENCIA
 app.post("/license/validate", async (req, res) => {
   try {
     console.log("POST /license/validate body:", req.body);
@@ -271,9 +266,7 @@ app.post("/license/validate", async (req, res) => {
   }
 });
 
-// ==========================================================
-// 3. ENDPOINT: REGISTRAR SUPERUSER (Ruta ajustada a /superusers/register)
-// ==========================================================
+// 3. ENDPOINT: REGISTRAR SUPERUSER
 app.post("/superusers/register", async (req, res) => {
   const schema = Joi.object({
     superUser: Joi.string().min(3).required().messages({
@@ -330,7 +323,6 @@ app.post("/superusers/register", async (req, res) => {
     // Transacción: insertar SuperUser y activar la licencia
     await db.run("BEGIN TRANSACTION");
     try {
-      // Asegúrate de que los nombres de columna aquí (superUser, password, etc.) coincidan con tu BD
       await db.run(
         "INSERT INTO SuperUser (superUser, password, cant_usuarios_permitidos, license_id) VALUES (?, ?, ?, ?)",
         [superUser, hashedPassword, finalCant, license.id_license]
@@ -372,8 +364,7 @@ app.post("/superusers/register", async (req, res) => {
       .json({ success: false, error: "Error interno del servidor" });
   }
 });
-
-// Devuelve la licencia más reciente asociada a superUser (puede venir con estado 'activa','expirada','revocada','pendiente')
+// Activa la licencia en el panel de sign-up
 app.get("/license/active", async (req, res) => {
   try {
     const { superUser } = req.query;
@@ -467,9 +458,7 @@ app.post("/login-superuser", async (req, res) => {
   }
 });
 
-/* ---------------------------
-   Login User (profesional)
-   --------------------------- */
+// Login User (profesional)
 app.post("/login-user", async (req, res) => {
   try {
     const { error } = userLoginSchema.validate(req.body);
@@ -503,7 +492,7 @@ app.post("/login-user", async (req, res) => {
   }
 });
 
-// GET /admin/superusers (lista de SuperUsers con estado de licencia)
+// lista de SuperUsers con estado de licencia en el panel de Admin
 app.get("/admin/superusers", requireAdmin, async (req, res) => {
   try {
     const rows = await db.all(`
@@ -756,7 +745,6 @@ app.post("/createUsuario", async (req, res) => {
 
   // 3. CONTINUAR CON LA CREACIÓN DEL USUARIO
   try {
-    // [AQUÍ DEBERÍAS HASHEAR LA CONTRASEÑA, EJEMPLO SIMPLE POR AHORA]
     const hashedPassword = password;
 
     await db.run(
@@ -798,7 +786,6 @@ app.put(
         [hashed, superUser]
       );
       if (!result.changes && result.changes !== 0) {
-        /* sqlite driver specifics */
       }
       res.json({
         success: true,
@@ -852,9 +839,7 @@ app.delete("/admin/superuser/:superUser", requireAdmin, async (req, res) => {
   }
 });
 
-/* ---------------------------
-   Cambiar contraseña de un profesional desde el panel de Residencia
-   --------------------------- */
+// Cambiar contraseña de un profesional desde el panel de Residencia
 const changePasswordSchema = Joi.object({
   superUser: Joi.string().min(3).required().messages({
     "string.empty": "El superusuario es requerido",
@@ -931,9 +916,7 @@ app.put("/cambiar-password", async (req, res) => {
   }
 });
 
-/* ---------------------------
-   Listar usuarios (query)
-   --------------------------- */
+// Listar usuarios (query)
 const listUsersSchema = Joi.object({
   superUser: Joi.string().min(3).required().messages({
     "string.empty": "superUser no puede estar vacío",
@@ -1079,7 +1062,7 @@ app.post("/usuarios", async (req, res) => {
       });
     }
 
-    // --- NUEVA LÓGICA: comprobar licencia ACTIVA y limites ---
+    // comprobar licencia ACTIVA y limites
     const license = await db.get(
       `SELECT id_license, tipo_licencia, max_usuarios, estado, fecha_expiracion
        FROM License
@@ -1151,9 +1134,8 @@ app.post("/usuarios", async (req, res) => {
   }
 });
 
-/**
- * Cambia estado a 'activa' y suma 1 año a la fecha de expiración.
- */
+// Cambia estado a 'activa' y suma 1 año a la fecha de expiración. (admin)
+
 app.put("/license/:id/renew", requireAdmin, async (req, res) => {
   try {
     const { id } = req.params;
@@ -1189,9 +1171,8 @@ app.put("/license/:id/renew", requireAdmin, async (req, res) => {
   }
 });
 
-/**
- * Cambia 'tipo_licencia' y 'max_usuarios' basado en el body.
- */
+// Cambia 'tipo_licencia' y 'max_usuarios' basado en el body. (admin)
+
 app.put("/license/:id/modify-type", requireAdmin, async (req, res) => {
   const { id } = req.params;
   const { tipo_licencia, max_usuarios } = req.body;
@@ -1256,10 +1237,8 @@ app.put("/license/:id/modify-type", requireAdmin, async (req, res) => {
   }
 });
 
-/// -----------------------------------------------------------------
-/// ENDPOINT 1: RECIBIR Y GUARDAR (Llamado por la App Externa/Postman)
-/// -----------------------------------------------------------------
-// (Este endpoint ya está corregido para incluir todos los campos de la tabla Sesion)
+// RECIBIR Y GUARDAR sesiones (Llamado por la App Externa/Postman)
+
 app.post(
   "/session/save",
   /* requireApiKey, */ async (req, res) => {
@@ -1372,10 +1351,7 @@ app.post(
   }
 );
 
-/// -----------------------------------------------------------------
-/// ENDPOINT 2: LEER Y ENVIAR (Llamado por tu App de Flutter)
-/// -----------------------------------------------------------------
-// Este endpoint consulta la BD y rearma el JSON anidado
+// ENDPOINT 2: LEER Y ENVIAR Este endpoint consulta la BD y rearma el JSON anidado
 app.get(
   "/sessions/:profesional",
   /* requireAuth, */ async (req, res) => {
@@ -1454,9 +1430,7 @@ app.get(
   }
 );
 
-/* ---------------------------
-   Obtener usuarios de un SuperUser
-   --------------------------- */
+// Obtener usuarios de un SuperUser
 const superUserParamSchema = Joi.string().min(3).required().messages({
   "string.empty": "superUser no puede estar vacío",
   "string.min": "superUser debe tener al menos 3 caracteres",

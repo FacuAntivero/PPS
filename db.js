@@ -1,4 +1,3 @@
-// db.js
 const sqlite3 = require("sqlite3").verbose();
 const bcrypt = require("bcrypt");
 require("dotenv").config();
@@ -46,7 +45,6 @@ db.all = function (sql, params = []) {
 
 async function initializeDatabase() {
   try {
-    // SuperUser: cant_usuarios_permitidos nullable (fallback) y license_id para trazabilidad
     await db.run(`
       CREATE TABLE IF NOT EXISTS SuperUser (
         superUser TEXT PRIMARY KEY,
