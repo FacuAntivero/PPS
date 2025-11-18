@@ -13,7 +13,7 @@ const {
 
 app.use(express.json());
 const cors = require("cors");
-app.use(cors({ origin: ["http://localhost:61774"] }));
+app.use(cors({ origin: ["http://localhost:62997"] }));
 
 const port = process.env.PORT || 3000;
 app.listen(port, "0.0.0.0", () => console.log(`Listening on port ${port}...`));
@@ -636,58 +636,6 @@ app.put("/license/:id/expire", requireAdmin, async (req, res) => {
       .json({ success: false, error: "Error interno del servidor" });
   }
 });
-async function getSuperUserLicenseStatus(superUser) {
-  try {
-    // Obtenemos la licencia por el nombre del SuperUser (que es el campo 'superUser' en License)
-    const licenseData = await db.get(
-      `SELECT * FROM License WHERE superUser = ?`,
-      [superUser]
-    );
-
-    if (!licenseData) {
-      return {
-        active: false,
-        maxUsers: 0,
-        currentUsers: 0,
-        error: "Licencia no encontrada.",
-      };
-    }
-
-    const currentUsersResult = await db.get(
-      `SELECT COUNT(id_usuario) as currentUsers FROM Usuarios WHERE superUser = ?`,
-      [superUser]
-    );
-    const currentUsers = currentUsersResult.currentUsers;
-
-    const licenseStatus = {
-      active:
-        licenseData.estado === "activa" &&
-        new Date(licenseData.fecha_expiracion) > new Date(),
-      isExpired:
-        licenseData.estado === "expirada" ||
-        new Date(licenseData.fecha_expiracion) <= new Date(),
-      maxUsers: licenseData.max_usuarios,
-      currentUsers: currentUsers,
-      estado: licenseData.estado,
-      fechaExpiracion: licenseData.fecha_expiracion,
-    };
-
-    // Si el estado es 'expirada' por la acción del administrador o la fecha pasó
-    if (licenseStatus.isExpired || licenseData.estado !== "activa") {
-      licenseStatus.active = false;
-    }
-
-    return licenseStatus;
-  } catch (err) {
-    console.error("Error al obtener el estado de la licencia:", err);
-    return {
-      active: false,
-      maxUsers: 0,
-      currentUsers: 0,
-      error: "Error interno al verificar la licencia.",
-    };
-  }
-}
 
 // --- RUTA DE API para que el frontend valide el estado (SuperUserDashboard) ---
 // La ruta que usa tu Flutter: await _api!.checkLicenseStatus(superUser: currentSuperUser);
@@ -923,82 +871,6 @@ const listUsersSchema = Joi.object({
     "string.min": "superUser debe tener al menos 3 caracteres",
     "any.required": "superUser es obligatorio",
   }),
-});
-
-app.get("/usuarios", async (req, res) => {
-  try {
-    // Validar parámetros de query
-    const { error } = listUsersSchema.validate(req.query);
-    if (error)
-      return res
-        .status(400)
-        .json({ success: false, error: error.details[0].message });
-
-    const { superUser } = req.query;
-
-    // Verificar que el superUser exista
-    const superUserExists = await db.get(
-      "SELECT superUser FROM SuperUser WHERE superUser = ?",
-      [superUser]
-    );
-    if (!superUserExists)
-      return res
-        .status(404)
-        .json({ success: false, error: "El superusuario no existe" });
-
-    // Buscar la licencia ACTIVA más reciente del superUser
-    const activeLicense = await db.get(
-      `SELECT id_license, tipo_licencia, max_usuarios, estado, fecha_activacion, fecha_expiracion
-       FROM License
-       WHERE superUser = ?
-         AND estado = 'activa'
-       ORDER BY fecha_activacion DESC
-       LIMIT 1`,
-      [superUser]
-    );
-
-    if (!activeLicense) {
-      // No hay licencia activa -> no permitimos listar/usar usuarios
-      return res.status(403).json({
-        success: false,
-        error:
-          "No hay licencia activa para este superusuario. Contacte al administrador.",
-      });
-    }
-
-    // Obtener usuarios (incluye nombre real)
-    const usuariosRows = await db.all(
-      "SELECT user, nombreReal FROM User WHERE superUser = ?",
-      [superUser]
-    );
-
-    // Contar usuarios actuales
-    const countRow = await db.get(
-      "SELECT COUNT(*) AS count FROM User WHERE superUser = ?",
-      [superUser]
-    );
-    const totalUsuarios = countRow ? countRow.count : usuariosRows.length;
-
-    // Formatear respuesta: usuarios como lista de objetos
-    const usuarios = usuariosRows.map((r) => ({
-      user: r.user,
-      nombreReal: r.nombreReal,
-    }));
-
-    res.status(200).json({
-      success: true,
-      superUser,
-      tipo_licencia: activeLicense.tipo_licencia,
-      max_usuarios: activeLicense.max_usuarios, // null = ilimitado
-      total_usuarios: totalUsuarios,
-      usuarios,
-    });
-  } catch (error) {
-    console.error("Error en GET /usuarios:", error);
-    res
-      .status(500)
-      .json({ success: false, error: "Error interno del servidor" });
-  }
 });
 
 // Esquema de validación para agregar un nuevo Usuario (mantén tu usuarioSchema)
